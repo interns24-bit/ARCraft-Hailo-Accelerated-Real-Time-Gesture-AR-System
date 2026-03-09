@@ -1,0 +1,12 @@
+[package]
+name = "rust_eye"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rust_eye"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.21", features = ["extension-module"] }
+opencv = { version = "0.92", default-features = false, features = ["videoio", "imgproc", "imgcodecs"] }
