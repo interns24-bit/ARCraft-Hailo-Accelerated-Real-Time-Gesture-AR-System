@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR Assistant</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        
+        #bg-camera { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; object-fit: cover; z-index: 1; }
+        #vrm-canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 2; pointer-events: none; }
+        
+        #ui-layer { position: absolute; bottom: 5%; left: 50%; transform: translateX(-50%); width: 80%; max-width: 800px; z-index: 3; display: flex; flex-direction: column; gap: 10px; }
+        
+        #dialogue-box {
+            background: rgba(0, 0, 0, 0.8);
+            color: white; padding: 20px; border-radius: 10px; min-height: 80px;
+            transition: all 0.5s ease;
+            border: 3px solid #ff66b2;
+            box-shadow: 0 0 15px #ff66b2;
+        }
+        .strict-mode { border-color: #00f2ff !important; box-shadow: 0 0 15px #00f2ff !important; }
+        
+        #name-tag { font-weight: bold; font-size: 1.2em; margin-bottom: 10px; color: #ff66b2; transition: color 0.5s ease;}
+        .strict-mode-text { color: #00f2ff !important; }
+        
+        #controls { display: flex; gap: 10px; }
+        input[type="text"] { flex: 1; padding: 10px; border-radius: 5px; border: none; outline: none; background: rgba(255,255,255,0.9); }
+        button { padding: 10px 20px; border-radius: 5px; border: none; background: #ff66b2; color: white; font-weight: bold; cursor: pointer; transition: background 0.3s; }
+        .strict-btn { background: #00f2ff !important; color: black !important; }
+    </style>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.154.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.154.0/examples/jsm/",
+                "@pixiv/three-vrm": "https://unpkg.com/@pixiv/three-vrm@2.0.0/lib/three-vrm.module.js"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <img id="bg-camera" src="/video_feed" alt="Camera Feed">
+    <canvas id="vrm-canvas"></canvas>
+
+    <div id="ui-layer">
+        <div id="dialogue-box">
+            <div id="name-tag">Assistant</div>
+            <div id="text">Waiting for someone...</div>
+        </div>
+        <div id="controls">
+            <button id="mic-btn" style="background: #28a745;">🎤 Speak</button>
+            <input type="text" id="chat-input" placeholder="Say something or hold an object and ask 'What is this?'...">
+            <button id="send-btn">Send</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+        const canvas = document.getElementById('vrm-canvas');
+        const renderer = new THREE.WebGLRenderer({ canvas: canvas, alpha: true, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 20.0);
+        camera.position.set(0.0, 1.4, 2.5);
+
+        const light = new THREE.DirectionalLight(0xffffff, 2.0);
+        light.position.set(1.0, 1.0, 1.0).normalize();
+        scene.add(light);
+
+        let currentVrm = undefined;
+
+        const loader = new GLTFLoader();
+        loader.crossOrigin = 'anonymous';
+        loader.register((parser) => new VRMLoaderPlugin(parser));
+
+        loader.load('/static/models/avatar.vrm',
+            (gltf) => {
+                const vrm = gltf.userData.vrm;
+                scene.add(vrm.scene);
+                currentVrm = vrm;
+                
+                // Fixed height to -0.1 so she stands right on the dialogue box
+                vrm.scene.position.set(0.4, -0.1, 0); 
+                vrm.scene.rotation.y = Math.PI + 0.2; 
+                
+                VRMUtils.rotateVRM0(vrm);
+            },
+            (progress) => console.log('Loading model...', 100.0 * (progress.loaded / progress.total), '%'),
+            (error) => console.error(error)
+        );
+
+        const sendBtn = document.getElementById('send-btn');
+        const chatInput = document.getElementById('chat-input');
+        const dialogueText = document.getElementById('text');
+        const dialogueBox = document.getElementById('dialogue-box');
+        const nameTag = document.getElementById('name-tag');
+        const micBtn = document.getElementById('mic-btn');
+
+        let currentAction = "none";
+        let actionStartTime = 0;
+
+        // --- SPEECH TO TEXT (STT) ---
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SpeechRecognition) {
+            const recognition = new SpeechRecognition();
+            recognition.continuous = false;
+            
+            recognition.onstart = function() {
+                chatInput.placeholder = "Listening... (Speak now!)";
+                micBtn.style.background = "#dc3545"; // Red when listening
+            };
+            
+            recognition.onresult = function(event) {
+                const transcript = event.results[0][0].transcript;
+                chatInput.value = transcript;
+                micBtn.style.background = "#28a745"; // Green again
+                sendMessage(); 
+            };
+
+            micBtn.addEventListener('click', () => {
+                recognition.start();
+            });
+        } else {
+            micBtn.style.display = "none";
+            console.log("Speech recognition not supported in this browser.");
+        }
+
+        async function sendMessage() {
+            const text = chatInput.value;
+            if (!text) return;
+
+            dialogueText.innerText = "Thinking...";
+            chatInput.value = "";
+
+            const response = await fetch('/interact', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: text })
+            });
+
+            const data = await response.json();
+            dialogueText.innerText = data.reply;
+
+            // Trigger Animation
+            currentAction = data.action;
+            actionStartTime = clock.elapsedTime;
+
+            // Play the generated voice (TTS)
+            if (data.audio) {
+                const audioPlayer = new Audio('/' + data.audio);
+                audioPlayer.play();
+            }
+
+            if (currentVrm) {
+                currentVrm.expressionManager.setValue('happy', 0);
+                currentVrm.expressionManager.setValue('sad', 0);
+
+                if (data.mood === "happy") {
+                    currentVrm.expressionManager.setValue('happy', 1.0);
+                    dialogueBox.classList.remove('strict-mode');
+                    nameTag.classList.remove('strict-mode-text');
+                    sendBtn.classList.remove('strict-btn');
+                    nameTag.innerText = "Assistant (Friendly)";
+                } else {
+                    currentVrm.expressionManager.setValue('sad', 1.0);
+                    dialogueBox.classList.add('strict-mode');
+                    nameTag.classList.add('strict-mode-text');
+                    sendBtn.classList.add('strict-btn');
+                    nameTag.innerText = "Assistant (Strict)";
+                }
+            }
+        }
+
+        sendBtn.addEventListener('click', sendMessage);
+        chatInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        const clock = new THREE.Clock();
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            const deltaTime = clock.getDelta();
+            const time = clock.elapsedTime;
+
+            if (currentVrm) {
+                currentVrm.update(deltaTime);
+                
+                // Fixed height base to match the new -0.1 position
+                currentVrm.scene.position.y = -0.1 + Math.sin(time * 2) * 0.01;
+
+                const leftArm = currentVrm.humanoid.getNormalizedBoneNode('leftUpperArm');
+                const rightArm = currentVrm.humanoid.getNormalizedBoneNode('rightUpperArm');
+                const rightLowerArm = currentVrm.humanoid.getNormalizedBoneNode('rightLowerArm');
+                const head = currentVrm.humanoid.getNormalizedBoneNode('head');
+
+                if (leftArm) leftArm.rotation.z = 1.2;
+
+                let targetRightArmZ = -1.2;
+                let targetRightLowerArmZ = 0;
+                let targetHeadX = 0;
+                let targetHeadY = 0;
+
+                const actionDuration = 3.0; 
+                const timeSinceAction = time - actionStartTime;
+
+                if (currentAction === "wave" && timeSinceAction < actionDuration) {
+                    targetRightArmZ = 1.5; 
+                    targetRightLowerArmZ = Math.sin(timeSinceAction * 10) * 0.5 - 0.5; 
+                } else if (currentAction === "nod" && timeSinceAction < actionDuration) {
+                    targetHeadX = Math.sin(timeSinceAction * 8) * 0.2; 
+                } else if (currentAction === "shake" && timeSinceAction < actionDuration) {
+                    targetHeadY = Math.sin(timeSinceAction * 8) * 0.3; 
+                } else if (timeSinceAction >= actionDuration) {
+                    currentAction = "none"; 
+                }
+
+                if (rightArm) rightArm.rotation.z += (targetRightArmZ - rightArm.rotation.z) * 0.1;
+                if (rightLowerArm) rightLowerArm.rotation.z += (targetRightLowerArmZ - rightLowerArm.rotation.z) * 0.1;
+                if (head) {
+                    head.rotation.x += (targetHeadX - head.rotation.x) * 0.1;
+                    head.rotation.y += (targetHeadY - head.rotation.y) * 0.1;
+                }
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
